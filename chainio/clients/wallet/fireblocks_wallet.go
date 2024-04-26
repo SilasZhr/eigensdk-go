@@ -182,7 +182,7 @@ func (t *fireblocksWallet) SendTransaction(ctx context.Context, tx *types.Transa
 	}
 
 	req := fireblocks.NewContractCallRequest(
-		tx.Hash().Hex(),
+		"", // externalTxID
 		assetID,
 		account.ID,                // source account ID
 		contract.ID,               // destination account ID
@@ -204,6 +204,10 @@ func (t *fireblocksWallet) SendTransaction(ctx context.Context, tx *types.Transa
 	t.logger.Debug("Fireblocks contract call complete", "txID", res.ID, "status", res.Status)
 
 	return res.ID, nil
+}
+
+func (t *fireblocksWallet) CancelTransactionBroadcast(ctx context.Context, txID TxID) (bool, error) {
+	return t.fireblocksClient.CancelTransaction(ctx, string(txID))
 }
 
 func (t *fireblocksWallet) GetTransactionReceipt(ctx context.Context, txID TxID) (*types.Receipt, error) {

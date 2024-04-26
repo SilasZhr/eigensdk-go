@@ -116,6 +116,7 @@ func (w *ELChainWriter) RegisterAsOperator(ctx context.Context, operator types.O
 	opDetails := delegationmanager.IDelegationManagerOperatorDetails{
 		EarningsReceiver:         gethcommon.HexToAddress(operator.EarningsReceiverAddress),
 		StakerOptOutWindowBlocks: operator.StakerOptOutWindowBlocks,
+		DelegationApprover:       gethcommon.HexToAddress(operator.DelegationApproverAddress),
 	}
 
 	noSendTxOpts, err := w.txMgr.GetNoSendTxOpts()
@@ -130,7 +131,7 @@ func (w *ELChainWriter) RegisterAsOperator(ctx context.Context, operator types.O
 	if err != nil {
 		return nil, errors.New("failed to send tx with err: " + err.Error())
 	}
-	w.logger.Info("tx succesfully included", "txHash", receipt.TxHash.String())
+	w.logger.Info("tx successfully included", "txHash", receipt.TxHash.String())
 
 	return receipt, nil
 }
@@ -160,7 +161,7 @@ func (w *ELChainWriter) UpdateOperatorDetails(
 	if err != nil {
 		return nil, errors.New("failed to send tx with err: " + err.Error())
 	}
-	w.logger.Info("succesfully updated operator metadata URI", "txHash", receipt.TxHash.String(), "operator", operator.Address)
+	w.logger.Info("successfully updated operator metadata URI", "txHash", receipt.TxHash.String(), "operator", operator.Address)
 
 	tx, err = w.delegationManager.UpdateOperatorMetadataURI(noSendTxOpts, operator.MetadataUrl)
 	if err != nil {
@@ -170,7 +171,7 @@ func (w *ELChainWriter) UpdateOperatorDetails(
 	if err != nil {
 		return nil, errors.New("failed to send tx with err: " + err.Error())
 	}
-	w.logger.Info("succesfully updated operator details", "txHash", receipt.TxHash.String(), "operator", operator.Address)
+	w.logger.Info("successfully updated operator details", "txHash", receipt.TxHash.String(), "operator", operator.Address)
 	return receipt, nil
 }
 

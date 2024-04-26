@@ -17,10 +17,17 @@ import (
 )
 
 var (
+	// TODO: refactor these errors to use a custom struct with taskIndex field instead of wrapping taskIndex in the error string directly.
+	//       see https://go.dev/blog/go1.13-errors
+	TaskInitializationErrorFn = func(err error, taskIndex types.TaskIndex) error {
+		return fmt.Errorf("Failed to initialize task %d: %w", taskIndex, err)
+	}
 	TaskAlreadyInitializedErrorFn = func(taskIndex types.TaskIndex) error {
 		return fmt.Errorf("task %d already initialized", taskIndex)
 	}
-	TaskExpiredError    = fmt.Errorf("task expired")
+	TaskExpiredErrorFn = func(taskIndex types.TaskIndex) error {
+		return fmt.Errorf("task %d expired", taskIndex)
+	}
 	TaskNotFoundErrorFn = func(taskIndex types.TaskIndex) error {
 		return fmt.Errorf("task %d not initialized or already completed", taskIndex)
 	}
@@ -217,12 +224,17 @@ func (a *BlsAggregatorService) singleTaskAggregatorGoroutineFunc(
 	}
 	operatorsAvsStateDict, err := a.avsRegistryService.GetOperatorsAvsStateAtBlock(context.Background(), quorumNumbers, taskCreatedBlock)
 	if err != nil {
-		// TODO: how should we handle such an error?
-		a.logger.Fatal("AggregatorService failed to get operators state from avs registry", "err", err, "blockNumber", taskCreatedBlock)
+		a.aggregatedResponsesC <- BlsAggregationServiceResponse{
+			Err: TaskInitializationErrorFn(fmt.Errorf("AggregatorService failed to get operators state from avs registry at blockNum %d: %w", taskCreatedBlock, err), taskIndex),
+		}
+		return
 	}
 	quorumsAvsStakeDict, err := a.avsRegistryService.GetQuorumsAvsStateAtBlock(context.Background(), quorumNumbers, taskCreatedBlock)
 	if err != nil {
-		a.logger.Fatal("Aggregator failed to get quorums state from avs registry", "err", err)
+		a.aggregatedResponsesC <- BlsAggregationServiceResponse{
+			Err: TaskInitializationErrorFn(fmt.Errorf("Aggregator failed to get quorums state from avs registry: %w", err), taskIndex),
+		}
+		return
 	}
 	totalStakePerQuorum := make(map[types.QuorumNum]*big.Int)
 	for quorumNum, quorumAvsState := range quorumsAvsStakeDict {
@@ -253,14 +265,14 @@ func (a *BlsAggregatorService) singleTaskAggregatorGoroutineFunc(
 				// first operator to sign on this digest
 				digestAggregatedOperators = aggregatedOperators{
 					// we've already verified that the operator is part of the task's quorum, so we don't need checks here
-					signersApkG2:               bls.NewZeroG2Point().Add(operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].Pubkeys.G2Pubkey),
+					signersApkG2:               bls.NewZeroG2Point().Add(operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].OperatorInfo.Pubkeys.G2Pubkey),
 					signersAggSigG1:            signedTaskResponseDigest.BlsSignature,
 					signersOperatorIdsSet:      map[types.OperatorId]bool{signedTaskResponseDigest.OperatorId: true},
 					signersTotalStakePerQuorum: operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].StakePerQuorum,
 				}
 			} else {
 				digestAggregatedOperators.signersAggSigG1.Add(signedTaskResponseDigest.BlsSignature)
-				digestAggregatedOperators.signersApkG2.Add(operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].Pubkeys.G2Pubkey)
+				digestAggregatedOperators.signersApkG2.Add(operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].OperatorInfo.Pubkeys.G2Pubkey)
 				digestAggregatedOperators.signersOperatorIdsSet[signedTaskResponseDigest.OperatorId] = true
 				for quorumNum, stake := range operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].StakePerQuorum {
 					if _, ok := digestAggregatedOperators.signersTotalStakePerQuorum[quorumNum]; !ok {
@@ -293,7 +305,7 @@ func (a *BlsAggregatorService) singleTaskAggregatorGoroutineFunc(
 				nonSignersG1Pubkeys := []*bls.G1Point{}
 				for _, operatorId := range nonSignersOperatorIds {
 					operator := operatorsAvsStateDict[operatorId]
-					nonSignersG1Pubkeys = append(nonSignersG1Pubkeys, operator.Pubkeys.G1Pubkey)
+					nonSignersG1Pubkeys = append(nonSignersG1Pubkeys, operator.OperatorInfo.Pubkeys.G1Pubkey)
 				}
 
 				indices, err := a.avsRegistryService.GetCheckSignaturesIndices(&bind.CallOpts{}, taskCreatedBlock, quorumNumbers, nonSignersOperatorIds)
@@ -317,11 +329,12 @@ func (a *BlsAggregatorService) singleTaskAggregatorGoroutineFunc(
 					NonSignerStakeIndices:        indices.NonSignerStakeIndices,
 				}
 				a.aggregatedResponsesC <- blsAggregationServiceResponse
+				taskExpiredTimer.Stop()
 				return
 			}
 		case <-taskExpiredTimer.C:
 			a.aggregatedResponsesC <- BlsAggregationServiceResponse{
-				Err: TaskExpiredError,
+				Err: TaskExpiredErrorFn(taskIndex),
 			}
 			return
 		}
@@ -358,9 +371,10 @@ func (a *BlsAggregatorService) verifySignature(
 	}
 
 	// 0. verify that the msg actually came from the correct operator
-	operatorG2Pubkey := operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].Pubkeys.G2Pubkey
+	operatorG2Pubkey := operatorsAvsStateDict[signedTaskResponseDigest.OperatorId].OperatorInfo.Pubkeys.G2Pubkey
 	if operatorG2Pubkey == nil {
-		a.logger.Fatal("Operator G2 pubkey not found")
+		a.logger.Error("Operator G2 pubkey not found", "operatorId", signedTaskResponseDigest.OperatorId, "taskId", taskIndex)
+		return fmt.Errorf("taskId %d: Operator G2 pubkey not found (operatorId: %x)", taskIndex, signedTaskResponseDigest.OperatorId)
 	}
 	a.logger.Debug("Verifying signed task response digest signature",
 		"operatorG2Pubkey", operatorG2Pubkey,
@@ -396,7 +410,7 @@ func checkIfStakeThresholdsMet(
 
 		totalStakeByQuorum, ok := totalStakePerQuorum[quorumNum]
 		if !ok {
-			// Note this case should not happend.
+			// Note this case should not happen.
 			// The `totalStakePerQuorum` is got from the contract, so if we not found the
 			// totalStakeByQuorum, that means the code have a bug.
 			logger.Errorf("TotalStake not found for quorum %d.", quorumNum)

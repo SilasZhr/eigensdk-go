@@ -1,7 +1,6 @@
 package avsregistry
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -12,16 +11,14 @@ import (
 	"github.com/Layr-Labs/eigensdk-go/logging"
 	"github.com/Layr-Labs/eigensdk-go/types"
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	gethcommon "github.com/ethereum/go-ethereum/common"
 
-	contractOperatorStateRetriever "github.com/Layr-Labs/eigensdk-go/contracts/bindings/OperatorStateRetriever"
+	apkreg "github.com/Layr-Labs/eigensdk-go/contracts/bindings/BLSApkRegistry"
 	opstateretriever "github.com/Layr-Labs/eigensdk-go/contracts/bindings/OperatorStateRetriever"
 	regcoord "github.com/Layr-Labs/eigensdk-go/contracts/bindings/RegistryCoordinator"
 	stakeregistry "github.com/Layr-Labs/eigensdk-go/contracts/bindings/StakeRegistry"
-	eigenabi "github.com/Layr-Labs/eigensdk-go/types/abi"
 )
 
 type AvsRegistryReader interface {
@@ -77,6 +74,12 @@ type AvsRegistryReader interface {
 		startBlock *big.Int,
 		stopBlock *big.Int,
 	) ([]types.OperatorAddr, []types.OperatorPubkeys, error)
+
+	QueryExistingRegisteredOperatorSockets(
+		ctx context.Context,
+		startBlock *big.Int,
+		stopBlock *big.Int,
+	) (map[types.OperatorId]types.Socket, error)
 }
 
 type AvsRegistryChainReader struct {
@@ -134,7 +137,7 @@ func BuildAvsRegistryChainReader(
 	if err != nil {
 		return nil, types.WrapError(errors.New("Failed to create contractStakeRegistry"), err)
 	}
-	contractOperatorStateRetriever, err := contractOperatorStateRetriever.NewContractOperatorStateRetriever(
+	contractOperatorStateRetriever, err := opstateretriever.NewContractOperatorStateRetriever(
 		operatorStateRetrieverAddr,
 		ethClient,
 	)
@@ -361,7 +364,7 @@ func (r *AvsRegistryChainReader) QueryExistingRegisteredOperatorPubKeys(
 	stopBlock *big.Int,
 ) ([]types.OperatorAddr, []types.OperatorPubkeys, error) {
 
-	blsApkRegistryAbi, err := abi.JSON(bytes.NewReader(eigenabi.BLSApkRegistryAbi))
+	blsApkRegistryAbi, err := apkreg.ContractBLSApkRegistryMetaData.GetAbi()
 	if err != nil {
 		return nil, nil, types.WrapError(errors.New("Cannot get Abi"), err)
 	}
@@ -399,7 +402,7 @@ func (r *AvsRegistryChainReader) QueryExistingRegisteredOperatorPubKeys(
 		if err != nil {
 			return nil, nil, types.WrapError(errors.New("Cannot filter logs"), err)
 		}
-		r.logger.Debug("avsRegistryChainReader.QueryExistingRegisteredOperatorPubKeys", "transactionLogs", logs, "fromBlock", i, "toBlock", toBlock)
+		r.logger.Debug("avsRegistryChainReader.QueryExistingRegisteredOperatorPubKeys", "numTransactionLogs", len(logs), "fromBlock", i, "toBlock", toBlock)
 
 		for _, vLog := range logs {
 
@@ -439,4 +442,51 @@ func (r *AvsRegistryChainReader) QueryExistingRegisteredOperatorPubKeys(
 	}
 
 	return operatorAddresses, operatorPubkeys, nil
+}
+
+func (r *AvsRegistryChainReader) QueryExistingRegisteredOperatorSockets(
+	ctx context.Context,
+	startBlock *big.Int,
+	stopBlock *big.Int,
+) (map[types.OperatorId]types.Socket, error) {
+
+	if startBlock == nil {
+		startBlock = big.NewInt(0)
+	}
+	if stopBlock == nil {
+		curBlockNum, err := r.ethClient.BlockNumber(ctx)
+		if err != nil {
+			return nil, types.WrapError(errors.New("Cannot get current block number"), err)
+		}
+		stopBlock = big.NewInt(int64(curBlockNum))
+	}
+
+	operatorIdToSocketMap := make(map[types.OperatorId]types.Socket)
+
+	// eth_getLogs is limited to a 10,000 range, so we need to iterate over the range
+	for i := startBlock; i.Cmp(stopBlock) <= 0; i.Add(i, big.NewInt(10_000)) {
+		toBlock := big.NewInt(0).Add(i, big.NewInt(10_000))
+		if toBlock.Cmp(stopBlock) > 0 {
+			toBlock = stopBlock
+		}
+
+		end := toBlock.Uint64()
+
+		filterOpts := &bind.FilterOpts{
+			Start: i.Uint64(),
+			End:   &end,
+		}
+		socketUpdates, err := r.registryCoordinator.FilterOperatorSocketUpdate(filterOpts, nil)
+		if err != nil {
+			return nil, types.WrapError(errors.New("Cannot filter operator socket updates"), err)
+		}
+
+		numSocketUpdates := 0
+		for socketUpdates.Next() {
+			operatorIdToSocketMap[socketUpdates.Event.OperatorId] = types.Socket(socketUpdates.Event.Socket)
+			numSocketUpdates++
+		}
+		r.logger.Debug("avsRegistryChainReader.QueryExistingRegisteredOperatorSockets", "numTransactionLogs", numSocketUpdates, "fromBlock", i, "toBlock", toBlock)
+	}
+	return operatorIdToSocketMap, nil
 }
